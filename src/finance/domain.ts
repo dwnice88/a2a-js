@@ -84,6 +84,36 @@ export interface FinanceRequest {
   metadata?: Record<string, unknown>;
 }
 
+/** Possible outcomes from the policy agent. */
+export type PolicyDecisionState =
+  | 'auto_rejected'
+  | 'auto_approved'
+  | 'needs_manager_approval'
+  | 'needs_manager_and_director_approval';
+
+/** Structured explanation item, for UI and audit history. */
+export interface DecisionReason {
+  /** Short machine-friendly code, e.g. 'below_threshold'. */
+  code: string;
+  /** Human-readable explanation for UI. */
+  message: string;
+}
+
+/** Policy agent's view of what should happen with this request. */
+export interface PolicyDecision {
+  /** Overall decision state. */
+  decisionState: PolicyDecisionState;
+
+  /** Who needs to approve, if anyone. */
+  requiredApprovalPath: ApprovalPath;
+
+  /** Reasons the decision was made (shown in UI, used in history). */
+  reasons: DecisionReason[];
+
+  /** Optional extra metadata for downstream agents. */
+  metadata?: Record<string, unknown>;
+}
+
 // Example object to keep TS honest during development (not exported).
 const __exampleFinanceRequest: FinanceRequest = {
   requestId: 'ESAF-2025-0001',
@@ -102,4 +132,16 @@ const __exampleFinanceRequest: FinanceRequest = {
     'Without this spend the resident would be at immediate risk; there is no alternative provision.',
   headOfFinance: 'Jane Smith',
   executiveTeamOrDelegate: 'Executive Director – People',
+};
+
+const __examplePolicyDecision: PolicyDecision = {
+  decisionState: 'needs_manager_approval',
+  requiredApprovalPath: 'manager_only',
+  reasons: [
+    {
+      code: 'below_threshold',
+      message:
+        'Amount is at or below the manager approval threshold.',
+    },
+  ],
 };
