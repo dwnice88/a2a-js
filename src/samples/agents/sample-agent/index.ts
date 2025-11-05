@@ -1,8 +1,6 @@
 import express from "express";
 import { v4 as uuidv4 } from 'uuid'; // For generating unique IDs
 
-import { Money, SpendType, FinanceRequest } from '../../../finance';
-
 import {
   AgentCard,
   Task,
@@ -33,15 +31,6 @@ class SampleAgentExecutor implements AgentExecutor {
     requestContext: RequestContext,
     eventBus: ExecutionEventBus
   ): Promise<void> {
-    // TODO: Remove dummy types once finance agents are wired in.
-    const __dummySpend: SpendType = 'services';
-    const __dummyMoney: Money = { amount: 1000, currency: 'GBP' };
-    // TODO: Remove dummyFinanceRequest once finance agents are wired up.
-    const __dummyFinanceRequest: FinanceRequest | null = null;
-    void __dummySpend;
-    void __dummyMoney;
-    void __dummyFinanceRequest;
-
     const userMessage = requestContext.userMessage;
     const existingTask = requestContext.task;
 
