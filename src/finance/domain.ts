@@ -114,6 +114,48 @@ export interface PolicyDecision {
   metadata?: Record<string, unknown>;
 }
 
+/** High-level lifecycle states for a finance request. */
+export type RequestLifecycleState =
+  | 'draft'
+  | 'submitted'
+  | 'policy_validated'
+  | 'awaiting_manager_approval'
+  | 'awaiting_director_approval'
+  | 'approved'
+  | 'rejected';
+
+/** Which agent last updated the status. */
+export type AgentName =
+  | 'intake' // Agent A
+  | 'policy' // Agent B
+  | 'summary' // Agent C
+  | 'approver'; // Agent D
+
+/** One historical status change, for audit/history. */
+export interface StatusHistoryEntry {
+  state: RequestLifecycleState;
+  updatedAt: string; // ISO datetime
+  updatedBy: AgentName;
+  note?: string;
+}
+
+/** Current view of a request's status plus its history. */
+export interface StatusRecord {
+  requestId: string;
+  currentState: RequestLifecycleState;
+  updatedAt: string;
+  updatedBy: AgentName;
+
+  /** Optional structured fields for UI. */
+  policyDecision?: PolicyDecision;
+
+  /** Free-form extra data, e.g. who approved, comments, etc. */
+  metadata?: Record<string, unknown>;
+
+  /** Full change history over time. */
+  history: StatusHistoryEntry[];
+}
+
 // Example object to keep TS honest during development (not exported).
 const __exampleFinanceRequest: FinanceRequest = {
   requestId: 'ESAF-2025-0001',
@@ -142,6 +184,22 @@ const __examplePolicyDecision: PolicyDecision = {
       code: 'below_threshold',
       message:
         'Amount is at or below the manager approval threshold.',
+    },
+  ],
+};
+
+const __exampleStatusRecord: StatusRecord = {
+  requestId: 'ESAF-2025-0001',
+  currentState: 'awaiting_manager_approval',
+  updatedAt: new Date().toISOString(),
+  updatedBy: 'policy',
+  policyDecision: __examplePolicyDecision,
+  history: [
+    {
+      state: 'submitted',
+      updatedAt: new Date().toISOString(),
+      updatedBy: 'intake',
+      note: 'Request submitted by requester.',
     },
   ],
 };
