@@ -308,22 +308,33 @@ export class FinanceSummaryAgentExecutor implements AgentExecutor {
       };
     }
 
-    const newState = outcome === "approved" ? "approved" : "rejected";
+    let nextState = record.status.currentState;
+    if (outcome === "approved") {
+      nextState = "approved";
+    } else if (outcome === "rejected") {
+      nextState = "rejected";
+    }
+
+    const historyNote =
+      outcome === "more_info_requested"
+        ? comment
+          ? `${approverRole} requested more information: ${comment}`
+          : `${approverRole} requested more information.`
+        : comment ??
+          `Decision recorded by ${approverRole}: ${outcome.toUpperCase()}`;
 
     record.status = {
       ...record.status,
-      currentState: newState,
+      currentState: nextState,
       updatedAt: now,
       updatedBy: "summary",
       history: [
         ...record.status.history,
         {
-          state: newState,
+          state: nextState,
           updatedAt: now,
           updatedBy: "summary",
-          note:
-            comment ??
-            `Decision recorded by ${approverRole}: ${outcome.toUpperCase()}`,
+          note: historyNote,
         },
       ],
     };

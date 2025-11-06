@@ -24,7 +24,10 @@ export interface PolicyResultPayload extends SummaryPayloadBase {
   statusRecord?: StatusRecord;
 }
 
-export type ApproverDecisionOutcome = "approved" | "rejected";
+export type ApproverDecisionOutcome =
+  | "approved"
+  | "rejected"
+  | "more_info_requested";
 
 export interface ApproverDecisionPayload extends SummaryPayloadBase {
   intent: "approver_decision";
