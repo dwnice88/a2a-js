@@ -17,7 +17,8 @@ export const financePolicyConfig: FinancePolicyConfig = {
   managerOnlyMax: 20000,
   managerAndDirectorMin: 20000.01,
   disallowedSpendTypes: [
-    // Example disallowed categories – adjust when you know the real list.
-    'travel',
+    "travel", // e.g. staff trips, conferences
+    "consultancy", // external consultants via this route
+    "grants", // grant-making should go via a different process
   ],
 } as const;
