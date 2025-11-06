@@ -26,7 +26,7 @@ The server listens on http://localhost:41003 and exposes its Agent Card at `/.we
 {
   "metadata": {
     "summaryPayload": {
-      "intent": "policy_result",
+      "intent": "policy_decided",
       "requestId": "ESAF-2025-0001",
       "financeRequest": { "...": "(FinanceRequest payload)" },
       "policyDecision": { "...": "(PolicyDecision payload)" }

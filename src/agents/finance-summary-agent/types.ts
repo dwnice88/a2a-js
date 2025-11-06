@@ -8,6 +8,7 @@ import type {
 
 export type SummaryIntent =
   | "policy_result" // A+B tell C about a policy decision
+  | "policy_decided" // alias for policy_result for clarity
   | "approver_decision" // D tells C about manager/director decisions
   | "status_query"; // A (or UI) asks C "what's the status?"
 
@@ -17,7 +18,7 @@ export interface SummaryPayloadBase {
 }
 
 export interface PolicyResultPayload extends SummaryPayloadBase {
-  intent: "policy_result";
+  intent: "policy_result" | "policy_decided";
   financeRequest: FinanceRequest;
   policyDecision: PolicyDecision;
   // Optional: status snapshot from upstream (can be omitted initially)

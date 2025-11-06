@@ -2,11 +2,7 @@ import { v4 as uuidv4 } from "uuid";
 import { A2AClient } from "../../client/index.js";
 import { AGENT_CARD_PATH } from "../../constants.js";
 
-import type {
-  Task,
-  TaskStatusUpdateEvent,
-  Message,
-} from "../../index.js";
+import type { Task, TaskStatusUpdateEvent, Message } from "../../index.js";
 
 import type {
   AgentExecutor,
@@ -21,10 +17,7 @@ import type {
   JSONRPCErrorResponse,
 } from "../../types.js";
 
-import {
-  REQUIRED_FIELDS,
-  generateRequestId,
-} from "./types.js";
+import { REQUIRED_FIELDS, generateRequestId } from "./types.js";
 import type {
   FinanceIntakeProgress,
   FinanceIntakeMetadata,
@@ -33,7 +26,9 @@ import type {
 import type {
   FinanceRequest,
   PolicyDecision,
+  StatusRecord,
 } from "../../finance/index.js";
+import type { SummaryMetadataEnvelope } from "../finance-summary-agent/types.js";
 import { runFinanceIntakePlanner } from "./planner.js";
 
 const FINANCE_INTAKE_DEBUG =
@@ -41,7 +36,10 @@ const FINANCE_INTAKE_DEBUG =
   process.env.FINANCE_INTAKE_DEBUG === "true";
 const FINANCE_POLICY_AGENT_URL =
   process.env.FINANCE_POLICY_AGENT_URL ?? "http://localhost:41002/";
+const FINANCE_SUMMARY_AGENT_URL =
+  process.env.FINANCE_SUMMARY_AGENT_URL ?? "http://localhost:41003/";
 let policyClientPromise: Promise<A2AClient> | null = null;
+let summaryClientPromise: Promise<A2AClient> | null = null;
 
 async function getPolicyClient(): Promise<A2AClient> {
   if (!policyClientPromise) {
@@ -59,6 +57,21 @@ async function getPolicyClient(): Promise<A2AClient> {
   return policyClientPromise;
 }
 
+async function getSummaryClient(): Promise<A2AClient> {
+  if (!summaryClientPromise) {
+    const baseUrl =
+      process.env.FINANCE_SUMMARY_AGENT_URL ?? "http://localhost:41003";
+    const normalised = baseUrl.replace(/\/+$/, "");
+    const cardUrl = `${normalised}/${AGENT_CARD_PATH}`;
+    summaryClientPromise = A2AClient.fromCardUrl(cardUrl);
+    logInfo(
+      `Initialised Finance Summary A2A client from Agent Card at ${cardUrl}`,
+    );
+  }
+
+  return summaryClientPromise;
+}
+
 export function logInfo(message: string, ...args: unknown[]) {
   console.log("[FinanceIntake]", message, ...args);
 }
@@ -67,6 +80,15 @@ export function logDebug(message: string, ...args: unknown[]) {
   if (FINANCE_INTAKE_DEBUG) {
     console.debug("[FinanceIntake][debug]", message, ...args);
   }
+}
+
+function getAgentReplyText(message?: Message): string | undefined {
+  if (!message?.parts) {
+    return undefined;
+  }
+
+  const textPart = message.parts.find((part) => part.kind === "text");
+  return textPart?.text;
 }
 
 export function logError(message: string, ...args: unknown[]) {
@@ -84,9 +106,15 @@ function initIntakeProgress(): FinanceIntakeProgress {
 }
 
 function getOrInitMetadata(task?: Task): FinanceIntakeMetadata {
-  const existing = (task?.metadata as FinanceIntakeMetadata | undefined)?.intake;
-  const intake = existing ?? initIntakeProgress();
-  return { intake };
+  const existing = task?.metadata as FinanceIntakeMetadata | undefined;
+  if (existing) {
+    return {
+      ...existing,
+      intake: existing.intake ?? initIntakeProgress(),
+    };
+  }
+
+  return { intake: initIntakeProgress() };
 }
 
 function withUpdatedMetadata(
@@ -247,6 +275,23 @@ export class FinanceIntakeAgentExecutor implements AgentExecutor {
       ? userText.replace(/^\/esaf-shortcut\s*/i, "")
       : userText;
 
+    const statusQueryRequestId = this.parseStatusQuery(
+      cleanUserText,
+      intake.requestId,
+    );
+    if (statusQueryRequestId) {
+      await this.respondWithStatus(
+        statusQueryRequestId,
+        metadata,
+        task,
+        taskId,
+        contextId,
+        userMessage,
+        eventBus,
+      );
+      return;
+    }
+
     // If we're in shortcut mode but the user hasn't provided any details,
     // create a fully-populated demo request and complete the task without
     // calling OpenAI.
@@ -261,7 +306,10 @@ export class FinanceIntakeAgentExecutor implements AgentExecutor {
       intake.missingFields = [];
       intake.lastQuestion = undefined;
 
-      const updatedMetadata: FinanceIntakeMetadata = { intake };
+      const updatedMetadata: FinanceIntakeMetadata = {
+        ...metadata,
+        intake,
+      };
       task = withUpdatedMetadata(task, updatedMetadata);
       eventBus.publish(task);
 
@@ -319,9 +367,36 @@ export class FinanceIntakeAgentExecutor implements AgentExecutor {
       intake.requestId = generateRequestId();
     }
 
-    const updatedMetadata: FinanceIntakeMetadata = { intake };
+    const updatedMetadata: FinanceIntakeMetadata = {
+      ...metadata,
+      intake,
+    };
     task = withUpdatedMetadata(task, updatedMetadata);
     eventBus.publish(task);
+
+    let metadataSnapshot = updatedMetadata;
+    let downstreamSummaryText: string | null = null;
+
+    if (plannerResult.isComplete && intake.requestId) {
+      const financeRequest = buildFinanceRequestForPolicy(intake);
+      if (financeRequest) {
+        logInfo(
+          `Calling downstream agents for request ${intake.requestId} (task ${taskId})`,
+        );
+        const downstreamResult = await this.processCompletedRequest(
+          financeRequest,
+          metadataSnapshot,
+          task,
+          eventBus,
+        );
+        if (downstreamResult) {
+          task = downstreamResult.task;
+          metadataSnapshot = downstreamResult.metadata;
+          downstreamSummaryText =
+            downstreamResult.summaryText ?? metadataSnapshot.statusText ?? null;
+        }
+      }
+    }
 
     let replyText: string;
     let state: "input-required" | "completed";
@@ -333,9 +408,12 @@ export class FinanceIntakeAgentExecutor implements AgentExecutor {
       state = "input-required";
     } else {
       const base = `I’ve captured your Essential Spend Authorisation request with reference ID ${intake.requestId}. We’ll now run it through the finance policy checks.`;
-      replyText = shortcut
+      const intro = shortcut
         ? `Shortcut mode: I’ve parsed your full description and ${base}`
         : `Thanks – ${base}`;
+      replyText = downstreamSummaryText
+        ? `${intro}\n\n${downstreamSummaryText}`
+        : intro;
       state = "completed";
     }
 
@@ -368,27 +446,65 @@ export class FinanceIntakeAgentExecutor implements AgentExecutor {
       `Task ${taskId} finished turn with state: ${state}`,
     );
 
-    if (plannerResult.isComplete && intake.requestId) {
-      const financeRequest = buildFinanceRequestForPolicy(intake);
-      if (financeRequest) {
-        logInfo(
-          `Calling Finance Policy Agent for request ${intake.requestId} (task ${taskId})`,
-        );
-        const policyDecision = await this.callPolicyAgent(financeRequest);
+  }
 
-        if (policyDecision) {
-          const metadataWithPolicy: FinanceIntakeMetadata = {
-            ...updatedMetadata,
-            policyDecision,
-          };
-          task = withUpdatedMetadata(task, metadataWithPolicy);
-        } else {
-          logError(
-            `Policy decision not available for request ${intake.requestId}`,
-          );
-        }
+  private async processCompletedRequest(
+    financeRequest: FinanceRequest,
+    metadata: FinanceIntakeMetadata,
+    task: Task,
+    eventBus: ExecutionEventBus,
+  ): Promise<{
+    task: Task;
+    metadata: FinanceIntakeMetadata;
+    summaryText?: string;
+  } | null> {
+    let workingMetadata = { ...metadata };
+
+    if (!workingMetadata.policyDecision) {
+      const policyDecision = await this.callPolicyAgent(financeRequest);
+      if (!policyDecision) {
+        return null;
       }
+
+      workingMetadata = {
+        ...workingMetadata,
+        policyDecision,
+      };
+      task = withUpdatedMetadata(task, workingMetadata);
+      eventBus.publish(task);
     }
+
+    if (workingMetadata.statusRecord) {
+      return {
+        task,
+        metadata: workingMetadata,
+        summaryText: workingMetadata.statusText,
+      };
+    }
+
+    const summaryResult = await this.notifySummaryAgentOfPolicyResult(
+      financeRequest,
+      workingMetadata.policyDecision!,
+    );
+
+    if (summaryResult?.statusRecord) {
+      workingMetadata = {
+        ...workingMetadata,
+        statusRecord: summaryResult.statusRecord,
+        statusText:
+          summaryResult.statusRecord.summaryForRequester ??
+          summaryResult.summaryText,
+      };
+      task = withUpdatedMetadata(task, workingMetadata);
+      eventBus.publish(task);
+    }
+
+    return {
+      task,
+      metadata: workingMetadata,
+      summaryText:
+        workingMetadata.statusText ?? summaryResult?.summaryText ?? undefined,
+    };
   }
 
   private async callPolicyAgent(
@@ -467,5 +583,187 @@ export class FinanceIntakeAgentExecutor implements AgentExecutor {
       logError("Failed to call policy agent", err);
       return null;
     }
+  }
+
+  private async notifySummaryAgentOfPolicyResult(
+    financeRequest: FinanceRequest,
+    policyDecision: PolicyDecision,
+  ): Promise<{ statusRecord?: StatusRecord; summaryText?: string } | null> {
+    const metadata: SummaryMetadataEnvelope = {
+      summaryPayload: {
+        intent: "policy_decided",
+        requestId: financeRequest.requestId,
+        financeRequest,
+        policyDecision,
+      },
+    };
+
+    return this.sendSummaryAgentMessage(
+      metadata,
+      "Record this policy decision and update requester-facing status.",
+    );
+  }
+
+  private async querySummaryAgentForStatus(
+    requestId: string,
+  ): Promise<{ statusRecord?: StatusRecord; summaryText?: string } | null> {
+    const metadata: SummaryMetadataEnvelope = {
+      summaryPayload: {
+        intent: "status_query",
+        requestId,
+        audience: "requester",
+      },
+    };
+
+    return this.sendSummaryAgentMessage(
+      metadata,
+      `Provide the latest requester-friendly ESAF status for ${requestId}.`,
+    );
+  }
+
+  private async sendSummaryAgentMessage(
+    metadata: SummaryMetadataEnvelope,
+    instruction: string,
+  ): Promise<{ statusRecord?: StatusRecord; summaryText?: string } | null> {
+    try {
+      const client = await getSummaryClient();
+      const message: Message = {
+        kind: "message",
+        role: "user",
+        messageId: uuidv4(),
+        parts: [{ kind: "text", text: instruction }],
+        metadata,
+      };
+
+      const params: MessageSendParams = {
+        message,
+        configuration: {
+          blocking: true,
+        },
+      };
+
+      const response: SendMessageResponse = await client.sendMessage(params);
+      if ("error" in response) {
+        const rpcError = response as JSONRPCErrorResponse;
+        logError(
+          "Finance Summary Agent JSON-RPC error",
+          rpcError.error?.code,
+          rpcError.error?.message,
+        );
+        return null;
+      }
+
+      const result = response.result;
+      if (!result) {
+        return null;
+      }
+
+      if (result.kind === "task") {
+        const statusRecord = (result.metadata as {
+          statusRecord?: StatusRecord;
+        })?.statusRecord;
+        const summaryText =
+          getAgentReplyText(result.status?.message) ??
+          statusRecord?.summaryForRequester;
+        return {
+          statusRecord,
+          summaryText: summaryText ?? undefined,
+        };
+      }
+
+      if (result.kind === "message") {
+        return {
+          summaryText: getAgentReplyText(result),
+        };
+      }
+
+      return null;
+    } catch (err) {
+      logError("Failed to call Finance Summary Agent", err);
+      return null;
+    }
+  }
+
+  private parseStatusQuery(
+    userText: string,
+    knownRequestId?: string,
+  ): string | null {
+    if (!userText) {
+      return null;
+    }
+
+    const trimmed = userText.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    const explicitMatch = trimmed.match(/^status\s+([A-Za-z0-9-]+)/i);
+    if (explicitMatch?.[1]) {
+      return explicitMatch[1];
+    }
+
+    if (trimmed.toLowerCase() === "status" && knownRequestId) {
+      return knownRequestId;
+    }
+
+    return null;
+  }
+
+  private async respondWithStatus(
+    requestId: string,
+    metadata: FinanceIntakeMetadata,
+    task: Task,
+    taskId: string,
+    contextId: string,
+    _userMessage: Message,
+    eventBus: ExecutionEventBus,
+  ): Promise<void> {
+    const summaryResult = await this.querySummaryAgentForStatus(requestId);
+    let workingMetadata = { ...metadata };
+
+    if (summaryResult?.statusRecord) {
+      workingMetadata = {
+        ...workingMetadata,
+        statusRecord: summaryResult.statusRecord,
+        statusText:
+          summaryResult.statusRecord.summaryForRequester ??
+          summaryResult.summaryText,
+      };
+      task = withUpdatedMetadata(task, workingMetadata);
+      eventBus.publish(task);
+    }
+
+    const replyText =
+      summaryResult?.summaryText ??
+      `I couldn't find a request with reference ID ${requestId}.`;
+
+    const state: TaskStatusUpdateEvent["status"]["state"] =
+      summaryResult?.summaryText ? "completed" : "failed";
+
+    const agentMessage: Message = {
+      kind: "message",
+      role: "agent",
+      messageId: uuidv4(),
+      parts: [{ kind: "text", text: replyText }],
+      taskId,
+      contextId,
+    };
+
+    const statusUpdate: TaskStatusUpdateEvent = {
+      kind: "status-update",
+      taskId,
+      contextId,
+      status: {
+        state,
+        message: agentMessage,
+        timestamp: getCurrentTimestamp(),
+      },
+      final: true,
+    };
+
+    eventBus.publish(statusUpdate);
+    logInfo(
+      `Responded to status query for ${requestId} (state=${state}, task ${taskId}).`,
+    );
   }
 }

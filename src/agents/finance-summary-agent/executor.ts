@@ -1,10 +1,8 @@
 import { v4 as uuidv4 } from "uuid";
+import { A2AClient } from "../../client/index.js";
+import { AGENT_CARD_PATH } from "../../constants.js";
 
-import type {
-  Task,
-  TaskStatusUpdateEvent,
-  Message,
-} from "../../index.js";
+import type { Task, TaskStatusUpdateEvent, Message } from "../../index.js";
 
 import type {
   AgentExecutor,
@@ -22,11 +20,30 @@ import type {
   SummaryStoreRecord,
 } from "./types.js";
 import { generateSummaries } from "./summariser.js";
-import type { StatusRecord } from "../../finance/index.js";
+import type {
+  FinanceRequest,
+  PolicyDecision,
+  StatusRecord,
+  RequestLifecycleState,
+  ApproverRole,
+} from "../../finance/index.js";
+import type {
+  ApproverMetadataEnvelope,
+  NotifyApprovalRequiredPayload,
+} from "../finance-approver-agent/types.js";
+import type {
+  MessageSendParams,
+  SendMessageResponse,
+  JSONRPCErrorResponse,
+} from "../../types.js";
 
 const FINANCE_SUMMARY_DEBUG =
   process.env.FINANCE_SUMMARY_DEBUG === "1" ||
   process.env.FINANCE_SUMMARY_DEBUG === "true";
+const DEFAULT_APPROVER_AGENT_URL =
+  process.env.FINANCE_APPROVER_AGENT_URL ?? "http://localhost:41004";
+const NORMALISED_APPROVER_AGENT_URL =
+  DEFAULT_APPROVER_AGENT_URL.replace(/\/+$/, "");
 
 export function logInfo(message: string, ...args: unknown[]) {
   console.log("[FinanceSummary]", message, ...args);
@@ -62,6 +79,7 @@ function initStatusRecord(requestId: string): StatusRecord {
 
 export class FinanceSummaryAgentExecutor implements AgentExecutor {
   private readonly store = new Map<string, SummaryStoreRecord>();
+  private approverClientPromise: Promise<A2AClient> | null = null;
 
   public async execute(
     requestContext: RequestContext,
@@ -108,7 +126,7 @@ export class FinanceSummaryAgentExecutor implements AgentExecutor {
       return;
     }
 
-    if (payload.intent === "policy_result") {
+    if (payload.intent === "policy_result" || payload.intent === "policy_decided") {
       await this.handlePolicyResult(
         payload as PolicyResultPayload,
         existingTask,
@@ -193,6 +211,18 @@ export class FinanceSummaryAgentExecutor implements AgentExecutor {
     eventBus.finished();
   }
 
+  private async getApproverClient(): Promise<A2AClient> {
+    if (!this.approverClientPromise) {
+      const cardUrl = `${NORMALISED_APPROVER_AGENT_URL}/${AGENT_CARD_PATH}`;
+      this.approverClientPromise = A2AClient.fromCardUrl(cardUrl);
+      logInfo(
+        `Initialised Finance Approver Agent client using Agent Card at ${cardUrl}.`,
+      );
+    }
+
+    return this.approverClientPromise;
+  }
+
   private async handlePolicyResult(
     payload: PolicyResultPayload,
     existingTask: Task | undefined,
@@ -216,19 +246,22 @@ export class FinanceSummaryAgentExecutor implements AgentExecutor {
       record.policyDecision = policyDecision;
     }
 
+    const nextState = this.getStateFromPolicyDecision(policyDecision);
+    const historyNote = this.buildPolicyHistoryNote(policyDecision);
+
     record.status = {
       ...record.status,
-      currentState: "policy_validated",
+      currentState: nextState,
       updatedAt: now,
       updatedBy: "summary",
       policyDecision,
       history: [
         ...record.status.history,
         {
-          state: "policy_validated",
+          state: nextState,
           updatedAt: now,
           updatedBy: "summary",
-          note: "Policy decision received.",
+          note: historyNote,
         },
       ],
     };
@@ -238,6 +271,12 @@ export class FinanceSummaryAgentExecutor implements AgentExecutor {
     record.status.summaryForApprover = summaries.summaryForApprover;
 
     this.store.set(requestId, record);
+
+    await this.notifyApproversIfRequired(
+      record,
+      policyDecision,
+      summaries.summaryForApprover,
+    );
 
     const task: Task = existingTask ?? {
       kind: "task",
@@ -287,6 +326,180 @@ export class FinanceSummaryAgentExecutor implements AgentExecutor {
     );
   }
 
+  private getStateFromPolicyDecision(
+    decision: PolicyDecision,
+  ): RequestLifecycleState {
+    switch (decision.requiredApprovalPath) {
+      case "manager_only":
+        return "awaiting_manager_approval";
+      case "manager_and_director":
+        return "awaiting_manager_approval";
+      default:
+        return "policy_validated";
+    }
+  }
+
+  private buildPolicyHistoryNote(decision: PolicyDecision): string {
+    switch (decision.requiredApprovalPath) {
+      case "manager_only":
+        return "Policy decision recorded; awaiting manager approval.";
+      case "manager_and_director":
+        return "Policy decision recorded; awaiting manager then director approvals.";
+      default:
+        return "Policy decision recorded; no approvals required.";
+    }
+  }
+
+  private async notifyApproversIfRequired(
+    record: SummaryStoreRecord,
+    policyDecision: PolicyDecision,
+    summaryForApprover: string,
+  ): Promise<void> {
+    const rolesToNotify: ApproverRole[] = [];
+    if (policyDecision.requiredApprovalPath === "manager_only") {
+      rolesToNotify.push("manager");
+    } else if (policyDecision.requiredApprovalPath === "manager_and_director") {
+      rolesToNotify.push("manager");
+    }
+
+    if (!rolesToNotify.length) {
+      return;
+    }
+
+    const notifiedRoles = this.getNotifiedRoles(record.status);
+    for (const role of rolesToNotify) {
+      if (notifiedRoles.has(role)) {
+        continue;
+      }
+
+      const payload: NotifyApprovalRequiredPayload = {
+        intent: "notify_approval_required",
+        requestId: record.status.requestId,
+        role,
+        summaryForApprover:
+          summaryForApprover ||
+          `Awaiting ${role} approval for ${record.status.requestId}.`,
+        statusRecord: record.status,
+        financeRequest: record.financeRequest
+          ? {
+              directorate: record.financeRequest.directorate,
+              serviceName: record.financeRequest.serviceName,
+              amountExclVAT: record.financeRequest.amountExclVAT,
+              descriptionOfSpend: record.financeRequest.descriptionOfSpend,
+            }
+          : undefined,
+        policyDecision: record.policyDecision,
+      };
+
+      await this.sendApproverNotification(payload);
+      notifiedRoles.add(role);
+    }
+
+    this.persistNotifiedRoles(record.status, notifiedRoles);
+  }
+
+  private async sendApproverNotification(
+    payload: NotifyApprovalRequiredPayload,
+  ): Promise<void> {
+    try {
+      const client = await this.getApproverClient();
+      const metadata: ApproverMetadataEnvelope = {
+        approverPayload: payload,
+      };
+      const message: Message = {
+        kind: "message",
+        role: "user",
+        messageId: uuidv4(),
+        parts: [
+          {
+            kind: "text",
+            text: `Please queue request ${payload.requestId} for ${payload.role} approval.`,
+          },
+        ],
+        metadata,
+      };
+
+      const params: MessageSendParams = {
+        message,
+        configuration: {
+          blocking: true,
+        },
+      };
+
+      const response: SendMessageResponse = await client.sendMessage(params);
+      if ("error" in response) {
+        const rpcError = response as JSONRPCErrorResponse;
+        logError(
+          "Finance Approver Agent JSON-RPC error",
+          rpcError.error?.code,
+          rpcError.error?.message,
+        );
+      } else {
+        logInfo(
+          `Notified Finance Approver Agent about ${payload.role} work item for ${payload.requestId}.`,
+        );
+      }
+    } catch (err) {
+      logError("Failed to notify Finance Approver Agent", err);
+    }
+  }
+
+  private getNotifiedRoles(status: StatusRecord): Set<ApproverRole> {
+    const notified =
+      (status.metadata?.notifiedApproverRoles as ApproverRole[] | undefined) ??
+      [];
+    return new Set(notified);
+  }
+
+  private persistNotifiedRoles(
+    status: StatusRecord,
+    roles: Set<ApproverRole>,
+  ): void {
+    status.metadata = {
+      ...(status.metadata ?? {}),
+      notifiedApproverRoles: Array.from(roles),
+    };
+  }
+
+  private async notifyDirectorIfNeeded(
+    record: SummaryStoreRecord,
+    summaryForApprover: string,
+  ): Promise<void> {
+    if (
+      record.policyDecision?.requiredApprovalPath !== "manager_and_director"
+    ) {
+      return;
+    }
+
+    const notifiedRoles = this.getNotifiedRoles(record.status);
+    if (notifiedRoles.has("director")) {
+      return;
+    }
+
+    const payload: NotifyApprovalRequiredPayload = {
+      intent: "notify_approval_required",
+      requestId: record.status.requestId,
+      role: "director",
+      summaryForApprover:
+        summaryForApprover ||
+        `Awaiting director approval for ${record.status.requestId}.`,
+      statusRecord: record.status,
+      financeRequest: record.financeRequest
+        ? {
+            directorate: record.financeRequest.directorate,
+            serviceName: record.financeRequest.serviceName,
+            amountExclVAT: record.financeRequest.amountExclVAT,
+            descriptionOfSpend: record.financeRequest.descriptionOfSpend,
+          }
+        : undefined,
+      policyDecision: record.policyDecision,
+    };
+
+    await this.sendApproverNotification(payload);
+    notifiedRoles.add("director");
+    this.persistNotifiedRoles(record.status, notifiedRoles);
+  }
+
   private async handleApproverDecision(
     payload: ApproverDecisionPayload,
     existingTask: Task | undefined,
@@ -308,20 +521,34 @@ export class FinanceSummaryAgentExecutor implements AgentExecutor {
       };
     }
 
+    const requiresDirector =
+      record.policyDecision?.requiredApprovalPath === "manager_and_director";
+
     let nextState = record.status.currentState;
     if (outcome === "approved") {
-      nextState = "approved";
+      if (approverRole === "manager" && requiresDirector) {
+        nextState = "awaiting_director_approval";
+      } else {
+        nextState = "approved";
+      }
     } else if (outcome === "rejected") {
       nextState = "rejected";
     }
 
-    const historyNote =
+    let historyNote =
       outcome === "more_info_requested"
         ? comment
           ? `${approverRole} requested more information: ${comment}`
           : `${approverRole} requested more information.`
         : comment ??
           `Decision recorded by ${approverRole}: ${outcome.toUpperCase()}`;
+    if (
+      outcome === "approved" &&
+      approverRole === "manager" &&
+      requiresDirector
+    ) {
+      historyNote = `${historyNote ?? "Manager approved."} Awaiting director approval next.`;
+    }
 
     record.status = {
       ...record.status,
@@ -343,6 +570,10 @@ export class FinanceSummaryAgentExecutor implements AgentExecutor {
     record.status.summaryForRequester = summaries.summaryForRequester;
     record.status.summaryForApprover = summaries.summaryForApprover;
     this.store.set(requestId, record);
+
+    if (outcome === "approved" && approverRole === "manager") {
+      await this.notifyDirectorIfNeeded(record, summaries.summaryForApprover);
+    }
 
     const task: Task = existingTask ?? {
       kind: "task",
