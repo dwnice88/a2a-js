@@ -1,23 +1,14 @@
+import 'dotenv/config';
+
 import express from "express";
-import { v4 as uuidv4 } from "uuid";
 
-import {
-  AgentCard,
-  Task,
-  TaskStatusUpdateEvent,
-  Message,
-} from "../../index.js";
+import type { AgentCard } from "../../index.js";
 
-import {
-  InMemoryTaskStore,
-  TaskStore,
-  AgentExecutor,
-  RequestContext,
-  ExecutionEventBus,
-  DefaultRequestHandler,
-} from "../../server/index.js";
+import { InMemoryTaskStore, DefaultRequestHandler } from "../../server/index.js";
+import type { TaskStore, AgentExecutor } from "../../server/index.js";
 
 import { A2AExpressApp } from "../../server/express/index.js";
+import { FinanceIntakeAgentExecutor, logInfo, logError } from "./executor.js";
 
 const financeIntakeAgentCard: AgentCard = {
   name: "Finance Intake Agent",
@@ -50,58 +41,6 @@ const financeIntakeAgentCard: AgentCard = {
   supportsAuthenticatedExtendedCard: false,
 };
 
-class FinanceIntakeAgentExecutor implements AgentExecutor {
-  public cancelTask = async (
-    taskId: string,
-    eventBus: ExecutionEventBus,
-  ): Promise<void> => {
-    // For now, no special cancellation logic is needed.
-  };
-
-  public async execute(
-    requestContext: RequestContext,
-    eventBus: ExecutionEventBus,
-  ): Promise<void> {
-    const userMessage = requestContext.userMessage;
-    const taskId = requestContext.taskId;
-    const contextId = requestContext.contextId;
-
-    console.log(
-      `[FinanceIntake] Received message ${userMessage.messageId} for task ${taskId} (context: ${contextId})`,
-    );
-
-    // Create a simple "hello" response for now.
-    const responseMessage: Message = {
-      kind: "message",
-      messageId: uuidv4(),
-      role: "agent",
-      taskId,
-      contextId,
-      parts: [
-        {
-          kind: "text",
-          text: "Thanks – I'm the Finance Intake Agent and will guide you through your ESAF request shortly.",
-        },
-      ],
-    };
-
-    const statusUpdate: TaskStatusUpdateEvent = {
-      kind: "status-update",
-      taskId,
-      contextId,
-      status: {
-        state: "completed",
-        timestamp: new Date().toISOString(),
-        message: responseMessage,
-      },
-      final: true,
-    };
-
-    eventBus.publish(statusUpdate);
-    eventBus.finished();
-  }
-}
-
 async function main(): Promise<void> {
   // 1. Create TaskStore
   const taskStore: TaskStore = new InMemoryTaskStore();
@@ -126,16 +65,24 @@ async function main(): Promise<void> {
     if (err) {
       throw err;
     }
-    console.log(
-      `[FinanceIntake] Server started on http://localhost:${PORT}`,
+    const baseUrl = `http://localhost:${PORT}`;
+    logInfo(`Server started on ${baseUrl}`);
+    logInfo(
+      `Agent Card available at ${baseUrl}/.well-known/agent-card.json`,
     );
-    console.log(
-      `[FinanceIntake] Agent Card: http://localhost:${PORT}/.well-known/agent-card.json`,
+    logInfo(
+      `Tip: use 'npm run a2a:cli ${baseUrl}' to chat with this agent.`,
     );
-    console.log("[FinanceIntake] Press Ctrl+C to stop the server");
+    logInfo(
+      "Shortcut demo: send '/esaf-shortcut' in the CLI for an instant sample request.",
+    );
+    logInfo(
+      "One-shot intake: paste a full ESAF description and the agent will try to complete all fields.",
+    );
+    logInfo("Press Ctrl+C to stop the server");
   });
 }
 
 main().catch((err) => {
-  console.error("[FinanceIntake] Fatal error starting server", err);
+  logError("Fatal error starting server", err);
 });

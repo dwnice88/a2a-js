@@ -75,6 +75,7 @@
     "print:finance-policy": "tsx scripts/printFinancePolicyConfig.ts"
   },
   "dependencies": {
+    "dotenv": "^17.2.3",
     "openai": "^6.8.1",
     "uuid": "^11.1.0"
   },
