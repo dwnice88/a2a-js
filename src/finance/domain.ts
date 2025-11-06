@@ -131,6 +131,8 @@ export type AgentName =
   | 'summary' // Agent C
   | 'approver'; // Agent D
 
+export type SummaryAudience = 'requester' | 'approver';
+
 /** One historical status change, for audit/history. */
 export interface StatusHistoryEntry {
   state: RequestLifecycleState;
@@ -151,6 +153,12 @@ export interface StatusRecord {
 
   /** Free-form extra data, e.g. who approved, comments, etc. */
   metadata?: Record<string, unknown>;
+
+  /** Natural-language summary for the original requester. */
+  summaryForRequester?: string;
+
+  /** Slightly more detailed summary for approvers (manager/director). */
+  summaryForApprover?: string;
 
   /** Full change history over time. */
   history: StatusHistoryEntry[];
