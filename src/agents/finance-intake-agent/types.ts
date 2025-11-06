@@ -1,4 +1,7 @@
-import type { FinanceRequest } from "../../finance/index.js";
+import type {
+  FinanceRequest,
+  PolicyDecision,
+} from "../../finance/index.js";
 
 export type FinanceRequestFieldKey = Exclude<
   keyof FinanceRequest,
@@ -24,6 +27,7 @@ export interface FinanceIntakeProgress {
 
 export interface FinanceIntakeMetadata {
   intake: FinanceIntakeProgress;
+  policyDecision?: PolicyDecision;
 }
 
 export const REQUIRED_FIELDS: FinanceRequestFieldKey[] = [

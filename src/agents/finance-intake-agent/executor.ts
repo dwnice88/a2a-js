@@ -1,4 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
+import { A2AClient } from "../../client/index.js";
+import { AGENT_CARD_PATH } from "../../constants.js";
 
 import type {
   Task,
@@ -13,6 +15,11 @@ import type {
 } from "../../server/index.js";
 
 import { getCurrentTimestamp } from "../../server/utils.js";
+import type {
+  MessageSendParams,
+  SendMessageResponse,
+  JSONRPCErrorResponse,
+} from "../../types.js";
 
 import {
   REQUIRED_FIELDS,
@@ -23,12 +30,34 @@ import type {
   FinanceIntakeMetadata,
   PlannerOutput,
 } from "./types.js";
-import type { FinanceRequest } from "../../finance/index.js";
+import type {
+  FinanceRequest,
+  PolicyDecision,
+} from "../../finance/index.js";
 import { runFinanceIntakePlanner } from "./planner.js";
 
 const FINANCE_INTAKE_DEBUG =
   process.env.FINANCE_INTAKE_DEBUG === "1" ||
   process.env.FINANCE_INTAKE_DEBUG === "true";
+const FINANCE_POLICY_AGENT_URL =
+  process.env.FINANCE_POLICY_AGENT_URL ?? "http://localhost:41002/";
+let policyClientPromise: Promise<A2AClient> | null = null;
+
+async function getPolicyClient(): Promise<A2AClient> {
+  if (!policyClientPromise) {
+    const baseUrl =
+      process.env.FINANCE_POLICY_AGENT_URL ?? "http://localhost:41002";
+    const cardUrl = `${baseUrl}/${AGENT_CARD_PATH}`;
+
+    policyClientPromise = A2AClient.fromCardUrl(cardUrl);
+
+    logInfo(
+      `Initialised Finance Policy A2A client from Agent Card at ${cardUrl}`,
+    );
+  }
+
+  return policyClientPromise;
+}
 
 export function logInfo(message: string, ...args: unknown[]) {
   console.log("[FinanceIntake]", message, ...args);
@@ -92,6 +121,24 @@ function createInitialTask(
     history: [userMessage],
     metadata,
   };
+}
+
+function buildFinanceRequestForPolicy(
+  intake: FinanceIntakeProgress,
+): FinanceRequest | null {
+  if (!intake.requestId) {
+    logDebug(
+      "Skipping policy call because requestId is not yet set on intake progress",
+    );
+    return null;
+  }
+
+  const candidate = {
+    ...intake.partialRequest,
+    requestId: intake.requestId,
+  } as FinanceRequest;
+
+  return candidate;
 }
 
 function getUserText(message: Message): string {
@@ -320,5 +367,105 @@ export class FinanceIntakeAgentExecutor implements AgentExecutor {
     logInfo(
       `Task ${taskId} finished turn with state: ${state}`,
     );
+
+    if (plannerResult.isComplete && intake.requestId) {
+      const financeRequest = buildFinanceRequestForPolicy(intake);
+      if (financeRequest) {
+        logInfo(
+          `Calling Finance Policy Agent for request ${intake.requestId} (task ${taskId})`,
+        );
+        const policyDecision = await this.callPolicyAgent(financeRequest);
+
+        if (policyDecision) {
+          const metadataWithPolicy: FinanceIntakeMetadata = {
+            ...updatedMetadata,
+            policyDecision,
+          };
+          task = withUpdatedMetadata(task, metadataWithPolicy);
+        } else {
+          logError(
+            `Policy decision not available for request ${intake.requestId}`,
+          );
+        }
+      }
+    }
+  }
+
+  private async callPolicyAgent(
+    financeRequest: FinanceRequest,
+  ): Promise<PolicyDecision | null> {
+    try {
+      logDebug(
+        "Preparing to call Finance Policy Agent at",
+        FINANCE_POLICY_AGENT_URL,
+      );
+      const client = await getPolicyClient();
+
+      const message: Message = {
+        kind: "message",
+        role: "user",
+        messageId: uuidv4(),
+        parts: [
+          {
+            kind: "text",
+            text:
+              "Please evaluate this ESAF request against policy thresholds and disallowed spend types.",
+          },
+        ],
+        metadata: {
+          financeRequest,
+        },
+      };
+
+      const params: MessageSendParams = {
+        message,
+        configuration: {
+          blocking: true,
+        },
+      };
+
+      const rpcResponse: SendMessageResponse = await client.sendMessage(
+        params,
+      );
+
+      if ("error" in rpcResponse) {
+        const error = rpcResponse as JSONRPCErrorResponse;
+        logError(
+          "Policy agent JSON-RPC error",
+          error.error?.code,
+          error.error?.message,
+        );
+        return null;
+      }
+
+      const result = rpcResponse.result;
+
+      if (!result || result.kind !== "task") {
+        logError("Policy agent did not return a Task result", result);
+        return null;
+      }
+
+      const taskResult = result as Task;
+      const metadata = taskResult.metadata as
+        | { policyDecision?: PolicyDecision }
+        | undefined;
+
+      if (!metadata?.policyDecision) {
+        logError(
+          "Policy agent Task result is missing policyDecision in metadata",
+        );
+        return null;
+      }
+
+      logDebug(
+        "Received policyDecision from Finance Policy Agent",
+        metadata.policyDecision,
+      );
+
+      return metadata.policyDecision;
+    } catch (err) {
+      logError("Failed to call policy agent", err);
+      return null;
+    }
   }
 }
