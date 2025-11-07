@@ -38,6 +38,8 @@ const FINANCE_POLICY_AGENT_URL =
   process.env.FINANCE_POLICY_AGENT_URL ?? "http://localhost:41002/";
 const FINANCE_SUMMARY_AGENT_URL =
   process.env.FINANCE_SUMMARY_AGENT_URL ?? "http://localhost:41003/";
+// Remember the last fully completed request for follow-up status questions in this single-user PoC.
+let lastCompletedRequestId: string | undefined;
 let policyClientPromise: Promise<A2AClient> | null = null;
 let summaryClientPromise: Promise<A2AClient> | null = null;
 
@@ -275,10 +277,16 @@ export class FinanceIntakeAgentExecutor implements AgentExecutor {
       ? userText.replace(/^\/esaf-shortcut\s*/i, "")
       : userText;
 
+    const knownRequestId = intake.requestId ?? lastCompletedRequestId;
     const statusQueryRequestId = this.parseStatusQuery(
       cleanUserText,
-      intake.requestId,
+      knownRequestId,
     );
+    logDebug("Status query parse result", {
+      userText: cleanUserText,
+      knownRequestId,
+      statusQueryRequestId,
+    });
     if (statusQueryRequestId) {
       await this.respondWithStatus(
         statusQueryRequestId,
@@ -383,6 +391,8 @@ export class FinanceIntakeAgentExecutor implements AgentExecutor {
         logInfo(
           `Calling downstream agents for request ${intake.requestId} (task ${taskId})`,
         );
+        // Remember this request as the latest completed ESAF for natural-language status follow-ups.
+        lastCompletedRequestId = financeRequest.requestId;
         const downstreamResult = await this.processCompletedRequest(
           financeRequest,
           metadataSnapshot,
@@ -589,6 +599,9 @@ export class FinanceIntakeAgentExecutor implements AgentExecutor {
     financeRequest: FinanceRequest,
     policyDecision: PolicyDecision,
   ): Promise<{ statusRecord?: StatusRecord; summaryText?: string } | null> {
+    // Remember last completed ESAF so natural language status queries can reference it.
+    lastCompletedRequestId = financeRequest.requestId;
+
     const metadata: SummaryMetadataEnvelope = {
       summaryPayload: {
         intent: "policy_decided",
@@ -697,20 +710,32 @@ export class FinanceIntakeAgentExecutor implements AgentExecutor {
       return null;
     }
 
-    const explicitMatch = trimmed.match(/^status\s+([A-Za-z0-9-]+)/i);
+    const lower = trimmed.toLowerCase();
+
+    const explicitMatch = trimmed.match(/^\s*status\s+([A-Za-z0-9-]+)/i);
     if (explicitMatch?.[1]) {
-      return explicitMatch[1];
+      return explicitMatch[1].toUpperCase();
     }
 
-    if (/status/i.test(trimmed)) {
-      const idMatch = trimmed.match(/ESAF-\d{4}-\d{4}/i);
-      if (idMatch?.[0]) {
-        return idMatch[0];
-      }
+    const idMatch = trimmed.match(/(ESAF-\d{4}-\d{4})/i);
+    if (idMatch?.[1]) {
+      return idMatch[1].toUpperCase();
     }
 
-    if (trimmed.toLowerCase().startsWith("status") && knownRequestId) {
+    const hasStatusWord = /\bstatus\b/.test(lower) || /\bupdate\b/.test(lower);
+    const hasOutcomeWord =
+      /\bapproved\b/.test(lower) ||
+      /\brejected\b/.test(lower) ||
+      /\bdecision\b/.test(lower) ||
+      /\bprogress\b/.test(lower);
+
+    if ((hasStatusWord || hasOutcomeWord) && knownRequestId) {
       return knownRequestId;
+    }
+
+    const shortIdMatch = trimmed.match(/^ESAF-\d{4}-\d{4}$/i);
+    if (shortIdMatch?.[0]) {
+      return shortIdMatch[0].toUpperCase();
     }
 
     return null;

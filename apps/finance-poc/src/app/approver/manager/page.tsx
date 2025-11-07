@@ -87,7 +87,9 @@ export default function ManagerPage() {
             <strong>{item.requestId}</strong> ·{" "}
             {new Date(item.createdAt).toLocaleString()}
           </p>
-          <p style={{ margin: "0 0 8px" }}>{item.summaryForApprover}</p>
+          <p style={{ margin: "0 0 8px", whiteSpace: "pre-line" }}>
+            {item.summaryForApprover}
+          </p>
           {item.directorate ? (
             <p style={{ margin: "0 0 4px" }}>Directorate: {item.directorate}</p>
           ) : null}
