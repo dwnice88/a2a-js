@@ -702,7 +702,14 @@ export class FinanceIntakeAgentExecutor implements AgentExecutor {
       return explicitMatch[1];
     }
 
-    if (trimmed.toLowerCase() === "status" && knownRequestId) {
+    if (/status/i.test(trimmed)) {
+      const idMatch = trimmed.match(/ESAF-\d{4}-\d{4}/i);
+      if (idMatch?.[0]) {
+        return idMatch[0];
+      }
+    }
+
+    if (trimmed.toLowerCase().startsWith("status") && knownRequestId) {
       return knownRequestId;
     }
 

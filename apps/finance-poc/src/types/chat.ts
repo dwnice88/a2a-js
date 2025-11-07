@@ -1,22 +1,23 @@
-export type ChatRole = "user" | "agent" | "system";
+export type ChatRole = "user" | "agent";
 
 export interface ChatMessage {
   id: string;
   role: ChatRole;
   text: string;
-  timestamp: string;
-  actions?: Array<{
-    label: string;
-    command: string;
-  }>;
+  createdAt: string;
+  taskId?: string;
+  contextId?: string;
 }
 
-export interface ChatRequestPayload {
+export interface ChatApiRequest {
   message: string;
-  uiRole: "requester" | "manager" | "director";
+  taskId?: string;
+  contextId?: string;
 }
 
-export interface ChatResponsePayload {
-  messages: ChatMessage[];
-  metadata?: Record<string, unknown>;
+export interface ChatApiResponse {
+  reply: ChatMessage;
+  taskId?: string;
+  contextId?: string;
+  requestId?: string;
 }

@@ -1,45 +1,131 @@
 "use client";
 
-import { ChatWindow } from "@/components/ChatWindow";
-import type { ChatResponsePayload } from "@/types/chat";
+import { useEffect, useState } from "react";
+import type {
+  ApproverDecisionOutcome,
+  ApproverInboxItem,
+} from "@/types/approver";
 
 export default function ManagerPage() {
-  const handleSend = async (message: string): Promise<ChatResponsePayload> => {
+  const [items, setItems] = useState<ApproverInboxItem[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function loadInbox() {
+    setLoading(true);
+    setError(null);
     try {
-      const res = await fetch("/api/chat/manager", {
+      const res = await fetch("/api/approver/manager/list");
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as { items: ApproverInboxItem[] };
+      setItems(data.items);
+    } catch (e) {
+      console.error("Manager inbox load error", e);
+      setError("Could not load manager inbox.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadInbox();
+    const id = setInterval(() => {
+      void loadInbox();
+    }, 5000);
+    return () => clearInterval(id);
+  }, []);
+
+  async function submitDecision(
+    requestId: string,
+    outcome: ApproverDecisionOutcome,
+    comment?: string,
+  ) {
+    setError(null);
+    try {
+      const res = await fetch("/api/approver/manager/decision", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({
+          requestId,
+          role: "manager",
+          outcome,
+          comment,
+        }),
       });
 
       if (!res.ok) {
-        throw new Error(`Manager API failed with status ${res.status}`);
+        throw new Error(`HTTP ${res.status}`);
       }
 
-      return (await res.json()) as ChatResponsePayload;
-    } catch (error) {
-      console.error("Manager chat error", error);
-      return {
-        messages: [
-          {
-            id: `agent-${Date.now()}`,
-            role: "agent",
-            text: "Sorry, I couldn't reach the Finance Approver Agent. Please try again shortly.",
-            timestamp: new Date().toISOString(),
-          },
-        ],
-      } satisfies ChatResponsePayload;
+      await loadInbox();
+    } catch (e) {
+      console.error("Manager decision error", e);
+      setError("Could not submit decision.");
     }
-  };
+  }
 
   return (
     <main style={{ maxWidth: 960, margin: "0 auto", padding: 24 }}>
-      <ChatWindow
-        title="Manager – ESAF Approvals"
-        placeholder="Type 'list' to see pending approvals…"
-        onSend={handleSend}
-        initialMessage="list"
-      />
+      <h1>Manager approval inbox</h1>
+      {error ? <p style={{ color: "red" }}>{error}</p> : null}
+      {loading ? <p>Loading…</p> : null}
+      {items.length === 0 && !loading ? <p>No pending approvals.</p> : null}
+
+      {items.map((item) => (
+        <div
+          key={item.requestId}
+          style={{
+            border: "1px solid #ddd",
+            borderRadius: 8,
+            padding: 12,
+            marginBottom: 12,
+          }}
+        >
+          <p style={{ margin: "0 0 8px" }}>
+            <strong>{item.requestId}</strong> ·{" "}
+            {new Date(item.createdAt).toLocaleString()}
+          </p>
+          <p style={{ margin: "0 0 8px" }}>{item.summaryForApprover}</p>
+          {item.directorate ? (
+            <p style={{ margin: "0 0 4px" }}>Directorate: {item.directorate}</p>
+          ) : null}
+          {item.serviceName ? (
+            <p style={{ margin: "0 0 4px" }}>Service: {item.serviceName}</p>
+          ) : null}
+          {item.amountLabel ? (
+            <p style={{ margin: "0 0 8px" }}>Amount: {item.amountLabel}</p>
+          ) : null}
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => submitDecision(item.requestId, "approved")}
+            >
+              Approve
+            </button>
+            <button
+              type="button"
+              onClick={() => submitDecision(item.requestId, "rejected")}
+            >
+              Reject
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                submitDecision(
+                  item.requestId,
+                  "more_info_requested",
+                  "Need more details.",
+                )
+              }
+            >
+              Ask for more info
+            </button>
+          </div>
+        </div>
+      ))}
     </main>
   );
 }

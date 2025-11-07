@@ -1,29 +1,32 @@
-import { NextResponse } from "next/server";
-import { AGENT_BASE_URLS } from "@/config/agents";
-import type { ChatResponsePayload } from "@/types/chat";
-import { buildErrorPayload, extractReplyFromResult } from "../utils";
+import crypto from "node:crypto";
+import { NextRequest, NextResponse } from "next/server";
+import { INTAKE_AGENT_URL } from "@/config/agents";
+import type { ChatApiRequest, ChatApiResponse } from "@/types/chat";
 
-export async function POST(request: Request) {
+export async function POST(req: NextRequest) {
   try {
-    const body = (await request.json()) as { message?: string };
-    const userMessage = body?.message ?? "";
+    const body = (await req.json()) as ChatApiRequest;
+    const userMessage = body.message ?? "";
+    const messageId = crypto.randomUUID();
 
     const rpcPayload = {
       jsonrpc: "2.0",
-      id: crypto.randomUUID(),
+      id: messageId,
       method: "message/send",
       params: {
         message: {
           kind: "message",
           role: "user",
-          messageId: crypto.randomUUID(),
+          messageId,
           parts: [{ kind: "text", text: userMessage }],
+          ...(body.taskId ? { taskId: body.taskId } : {}),
+          ...(body.contextId ? { contextId: body.contextId } : {}),
           metadata: {},
         },
       },
     };
 
-    const response = await fetch(`${AGENT_BASE_URLS.intake}/`, {
+    const response = await fetch(`${INTAKE_AGENT_URL}/`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(rpcPayload),
@@ -33,45 +36,52 @@ export async function POST(request: Request) {
       throw new Error(`Agent responded with status ${response.status}`);
     }
 
-    const rpcResult = await response.json();
-    const { text, taskMetadata } = extractReplyFromResult(rpcResult?.result);
+    const json = await response.json();
+    const result = json?.result;
+    const agentMessage = result?.message ?? result?.status?.message;
+    const parts = Array.isArray(agentMessage?.parts)
+      ? agentMessage.parts
+      : [];
+    const textPart = parts.find(
+      (part: { kind?: string }) => part?.kind === "text",
+    );
+    const replyText =
+      textPart?.text ??
+      "Sorry, I couldn't understand the agent response.";
+
+    const taskId = result?.task?.taskId ?? body.taskId;
+    const contextId = result?.task?.contextId ?? body.contextId;
     const requestId =
-      (taskMetadata?.intake as { requestId?: string } | undefined)?.requestId ??
-      (taskMetadata?.statusRecord as { requestId?: string } | undefined)
-        ?.requestId;
-    const statusText =
-      (taskMetadata?.statusText as string | undefined) ??
-      (taskMetadata?.statusRecord as { summaryForRequester?: string } | undefined)
-        ?.summaryForRequester;
+      result?.task?.metadata?.intake?.requestId ??
+      result?.task?.metadata?.requestId ??
+      result?.task?.metadata?.statusRecord?.requestId;
 
-    const metadata =
-      requestId || statusText
-        ? {
-            ...(requestId ? { requestId } : {}),
-            ...(statusText ? { statusText } : {}),
-          }
-        : undefined;
-
-    const payload: ChatResponsePayload = {
-      messages: [
-        {
-          id: `agent-${Date.now()}`,
-          role: "agent",
-          text,
-          timestamp: new Date().toISOString(),
-        },
-      ],
-      metadata,
+    const payload: ChatApiResponse = {
+      reply: {
+        id: `agent-${Date.now()}`,
+        role: "agent",
+        text: replyText,
+        createdAt: new Date().toISOString(),
+        taskId,
+        contextId,
+      },
+      taskId,
+      contextId,
+      requestId,
     };
 
     return NextResponse.json(payload);
   } catch (error) {
-    console.error("Error calling intake agent: ", error);
-    return NextResponse.json(
-      buildErrorPayload(
-        "Sorry, I couldn't reach the agent. Please try again shortly.",
-      ),
-      { status: 200 },
-    );
+    console.error("Requester chat error", error);
+    const fallback: ChatApiResponse = {
+      reply: {
+        id: `agent-${Date.now()}`,
+        role: "agent",
+        text: "I couldn't reach the finance agent. Please try again.",
+        createdAt: new Date().toISOString(),
+      },
+    };
+
+    return NextResponse.json(fallback, { status: 200 });
   }
 }

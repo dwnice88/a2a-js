@@ -1,7 +1,6 @@
-export const AGENT_BASE_URLS = {
-  intake: "http://localhost:41001",
-  approver: "http://localhost:41004",
-  summary: "http://localhost:41003",
-} as const;
+export const INTAKE_AGENT_URL =
+  process.env.NEXT_PUBLIC_FINANCE_INTAKE_AGENT_URL ?? "http://localhost:41001";
 
-export type AgentKind = keyof typeof AGENT_BASE_URLS;
+export const APPROVER_AGENT_URL =
+  process.env.NEXT_PUBLIC_FINANCE_APPROVER_AGENT_URL ??
+  "http://localhost:41004";
